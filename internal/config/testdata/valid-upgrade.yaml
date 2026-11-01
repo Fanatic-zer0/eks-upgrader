@@ -1,0 +1,116 @@
+apiVersion: platform.io/v1
+kind: EKSUpgradePlan
+
+metadata:
+  name: test-cluster-1-31
+  cluster: test-cluster
+  region: ap-south-1
+
+spec:
+  clusterConfig: ./valid-cluster.yaml
+  targetKubernetesVersion: "1.31"
+
+  execution:
+    mode: sequential
+    dryRun: false
+    resumeOnFailure: true
+    maxConcurrentNodeGroups: 1
+    stateBackend: sqlite
+    stateFile: ./state/upgrade.db
+    lock:
+      enabled: true
+      backend: local
+      ttl: 4h
+
+  stateReconciliation:
+    enabled: true
+    failOnDrift: true
+
+  preflight:
+    requiredNodeGroupVersionsMatchControlPlane: true
+    requireAllNodesReady: true
+    requirePDBsForCriticalWorkloads: true
+    criticalNamespaces:
+      - kube-system
+    minAvailableIPsPerSubnet: 10
+    requireSubnetCapacity: true
+    deprecatedAPIs:
+      failOnFound: true
+      failOnRemovedInTargetVersion: true
+      warnOnDeprecatedBeforeRemoval: true
+    eksUpgradeInsights:
+      enabled: true
+      failOnError: true
+      acknowledgeWarnings: true
+    cloudwatch:
+      enabled: false
+      apiServer5xxThreshold: 5
+      evaluationWindowMinutes: 10
+
+  controlPlane:
+    timeout: 90m
+    approval:
+      required: true
+      approvers:
+        - platform-oncall
+      approvalTimeout: 12h
+    wait:
+      interval: 30s
+      timeout: 90m
+
+  addons:
+    upgrade: true
+    names:
+      - vpc-cni
+      - coredns
+      - kube-proxy
+    strategy: latestCompatible
+    timeout: 30m
+
+  karpenter:
+    enabled: false
+
+  nodeGroups:
+    order:
+      - system
+      - app-a
+    strategy: rolling
+    maxUnavailablePercentage: 33
+    perNodeGroupTimeout: 60m
+    drainTimeout: 15m
+    waitBetweenGroups: 5m
+    healthGates:
+      requireNodesReady: true
+      requirePodsReady: true
+      maxPendingPods: 0
+      requirePDBRespected: true
+
+  canary:
+    enabled: false
+
+  fallback:
+    onPreflightFailure: abort
+    onReadinessBlockingFailure: abort
+    onStateDrift: pause
+    onControlPlaneFailure: pause
+    onAddonFailure: pause
+    onKarpenterFailure: pause
+    onNodeGroupFailure: pause
+    onCanaryFailure: pause
+    onPostCheckFailure: pause
+    preserveFailedNodeGroup: true
+    blueGreenNodeGroups:
+      enabled: false
+      suffix: "-v{targetMinor}"
+    notify:
+      slackWebhookEnv: SLACK_WEBHOOK_URL
+
+  postUpgrade:
+    verifyNodes: true
+    verifyWorkloads: true
+    verifyIngress: false
+    verifyDNS: true
+    verifyPVCs: false
+    runSmokeTests: false
+    generateConfigPatch: true
+    outputDir: ./output

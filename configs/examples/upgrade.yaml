@@ -1,0 +1,182 @@
+apiVersion: platform.io/v1
+kind: EKSUpgradePlan
+
+metadata:
+  name: prod-cluster-1-31
+  cluster: prod-cluster
+  region: ap-south-1
+  # runID: optional-custom-run-id
+
+spec:
+  clusterConfig: ./cluster.yaml
+  targetKubernetesVersion: "1.31"
+
+  execution:
+    mode: sequential   # orchestration context only (sequential|interactive); concurrency/rollout style is governed by maxConcurrentNodeGroups below and nodeGroups.strategy, not by this field
+    dryRun: false
+    resumeOnFailure: true
+    maxConcurrentNodeGroups: 1
+    stateBackend: sqlite
+    stateFile: ./state/upgrade.db
+    lock:
+      enabled: true
+      backend: local
+      ttl: 4h
+
+  stateReconciliation:
+    enabled: true
+    failOnDrift: true
+    ignoredFields:
+      - managedNodeGroups[*].status
+    warnOnlyOn:
+      - cluster.tags
+      - managedNodeGroups[*].labels
+    blockOn:
+      - cluster.version
+      - managedNodeGroups[*].kubernetesVersion
+      - managedNodeGroups[*].size
+      - karpenter.nodeClasses[*].amiSelectorTerms
+      - karpenter.nodePools[*].disruption.budgets
+
+  preflight:
+    requiredNodeGroupVersionsMatchControlPlane: true
+    requireAllNodesReady: true
+    requirePDBsForCriticalWorkloads: true
+    criticalNamespaces:
+      - kube-system
+      - checkout
+      - payments
+    minAvailableIPsPerSubnet: 10
+    requireSubnetCapacity: true
+    deprecatedAPIs:
+      failOnFound: true
+      failOnRemovedInTargetVersion: true
+      warnOnDeprecatedBeforeRemoval: true
+    eksUpgradeInsights:
+      enabled: true
+      failOnError: true
+      acknowledgeWarnings: true
+    cloudwatch:
+      enabled: true   # requires control-plane logging enabled or Container Insights; falls back to a direct /metrics scrape if unavailable (see docs/readiness-checks.md)
+      apiServer5xxThreshold: 5
+      evaluationWindowMinutes: 10
+
+  controlPlane:
+    timeout: 90m
+    approval:
+      required: true
+      approvers:
+        - platform-oncall
+      approvalTimeout: 12h
+    wait:
+      interval: 30s
+      timeout: 90m
+
+  addons:
+    upgrade: true
+    names:
+      - vpc-cni
+      - coredns
+      - kube-proxy
+    strategy: latestCompatible
+    timeout: 30m
+
+  karpenter:
+    enabled: true
+    namespace: karpenter
+    controller:
+      upgradeStrategy: helm
+      chartRepository: https://charts.karpenter.sh
+      chartName: karpenter
+      chartVersion: "1.6.0"
+      waitTimeout: 20m
+    nodeClasses:
+      - name: default
+        manifestPath: ./karpenter-ec2nodeclass.yaml
+        amiStrategy: alias
+        amiAlias: "al2023@v20250918"
+    nodePools:
+      - name: general-purpose
+        manifestPath: ./karpenter-nodepool.yaml
+        driftEnabled: true
+        maxUnavailablePercentage: 20
+        maxConcurrentDriftedNodes: 2
+        disruptionBudgets:
+          - nodes: "10%"
+          - nodes: "0"
+            schedule: "0 17 * * mon-fri"
+            duration: 16h
+            reasons:
+              - Drifted
+    safeguards:
+      pauseConsolidationDuringUpgrade: true
+      requirePDBs: true
+      requireNodeCapacityHeadroom: true
+      minFreeIPsPerSubnet: 10
+
+  nodeGroups:
+    order:
+      - system
+      - app-a
+      - app-b
+    strategy: rolling   # rollout style per node group; concurrency across node groups is capped by execution.maxConcurrentNodeGroups above
+    maxUnavailablePercentage: 33
+    perNodeGroupTimeout: 60m
+    drainTimeout: 15m
+    waitBetweenGroups: 5m
+    healthGates:
+      requireNodesReady: true
+      requirePodsReady: true
+      maxPendingPods: 0
+      requirePDBRespected: true
+
+  canary:
+    enabled: true
+    namespaces:
+      - checkout
+      - payments
+    prometheusURL: https://prometheus.example.com
+    prometheusBearerTokenEnv: PROMETHEUS_TOKEN
+    prometheusTLSSkipVerify: false
+    comparisonMode: absolute   # absolute | baseline (compares against a control group of not-yet-upgraded nodes)
+    checks:
+      - name: error-rate
+        query: "sum(rate(http_requests_total{status=~'5..'}[5m])) / sum(rate(http_requests_total[5m]))"
+        threshold: 0.01
+        comparison: lessThan
+        duration: 5m
+      - name: p99-latency
+        query: "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))"
+        threshold: 1.5
+        comparison: lessThan
+        duration: 5m
+
+  fallback:
+    onPreflightFailure: abort
+    onReadinessBlockingFailure: abort
+    onStateDrift: pause
+    onControlPlaneFailure: pause
+    onAddonFailure: pause
+    onKarpenterFailure: pause
+    onNodeGroupFailure: pause
+    onCanaryFailure: pause
+    onPostCheckFailure: pause
+    preserveFailedNodeGroup: true
+    blueGreenNodeGroups:
+      enabled: false
+      suffix: "-v{targetMinor}"
+    notify:
+      slackWebhookEnv: SLACK_WEBHOOK_URL
+      pagerdutyRoutingKeyEnv: PAGERDUTY_ROUTING_KEY
+      webhookEnv: UPGRADE_WEBHOOK_URL
+
+  postUpgrade:
+    verifyNodes: true
+    verifyWorkloads: true
+    verifyIngress: true
+    verifyDNS: true
+    verifyPVCs: true
+    runSmokeTests: true
+    smokeTestCommand: ["./scripts/smoke-test.sh"]
+    generateConfigPatch: true
+    outputDir: ./output
