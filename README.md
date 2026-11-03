@@ -1,6 +1,6 @@
 # eks-upgrader
 
-A CLI-first Amazon EKS upgrade orchestrator that safely upgrades EKS clusters using
+A CLI based Amazon EKS upgrade tool that safely upgrades EKS clusters using
 `eksctl` as the only tool that mutates EKS and CloudFormation resources. `eks-upgrader`
 owns sequencing, policy enforcement, state, live-state reconciliation, upgrade
 readiness analysis, canary validation, approval workflows, audit, and notifications —
